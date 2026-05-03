@@ -9,8 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 
 @Service
 @Slf4j
@@ -22,10 +21,7 @@ public class IAService {
     @Value("${openai.api.key:}")
     private String openaiApiKey;
 
-    // ✅ ENDPOINT NUEVO
     private static final String OPENAI_URL = "https://api.openai.com/v1/responses";
-
-    // ✅ MODELO ACTUAL
     private static final String OPENAI_MODEL = "gpt-4.1-mini";
 
     public IAService() {
@@ -36,23 +32,20 @@ public class IAService {
         this.restTemplate = new RestTemplate(factory);
     }
 
-    // 🔍 DEBUG + VALIDACIÓN
+    // ✅ VALIDACIÓN INICIAL
     @PostConstruct
     public void init() {
         if (openaiApiKey == null || openaiApiKey.isEmpty()) {
-            throw new RuntimeException("❌ OPENAI_API_KEY no está configurada");
+            throw new RuntimeException("❌ OPENAI_API_KEY no configurada");
         }
-
-        // eliminar comillas si Railway las mete
         openaiApiKey = openaiApiKey.replace("\"", "");
-
-        log.info("✅ OpenAI API Key cargada correctamente");
+        log.info("✅ OpenAI API Key OK");
     }
 
     // ─────────────────────────────────────────────
-    // LLAMADA A OPENAI (NUEVA API)
+    // 🔥 LLAMADA CENTRAL (API NUEVA)
     // ─────────────────────────────────────────────
-    private String llamarOpenAI(String prompt) {
+    private JsonNode llamarOpenAI(String prompt) {
         try {
             org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
             headers.set("Authorization", "Bearer " + openaiApiKey);
@@ -67,8 +60,7 @@ public class IAService {
 
             JsonNode response = restTemplate.postForObject(OPENAI_URL, request, JsonNode.class);
 
-            // ✅ NUEVA FORMA DE LEER RESPUESTA
-            return response
+            String texto = response
                     .path("output")
                     .get(0)
                     .path("content")
@@ -77,41 +69,66 @@ public class IAService {
                     .asText()
                     .trim();
 
-        } catch (HttpClientErrorException e) {
-            log.error("❌ Error HTTP OpenAI: {} - {}", e.getStatusCode(), e.getResponseBodyAsString());
-            throw new RuntimeException("Error OpenAI: " + e.getResponseBodyAsString(), e);
-        } catch (Exception e) {
-            log.error("❌ Error interno OpenAI: {}", e.getMessage());
-            throw new RuntimeException("Error interno OpenAI: " + e.getMessage(), e);
-        }
-    }
-
-    // ─────────────────────────────────────────────
-    // MÉTODO PÚBLICO DE EJEMPLO
-    // ─────────────────────────────────────────────
-    public JsonNode generarJsonDesdePrompt(String prompt) {
-        try {
-            String respuestaTexto = llamarOpenAI(prompt);
-
-            // limpiar markdown si viene con ```json
-            String cleaned = respuestaTexto
+            String cleaned = texto
                     .replaceAll("(?s)^```json\\s*", "")
                     .replaceAll("(?s)```\\s*$", "")
                     .trim();
 
             return objectMapper.readTree(cleaned);
 
+        } catch (HttpClientErrorException e) {
+            log.error("❌ Error OpenAI: {} - {}", e.getStatusCode(), e.getResponseBodyAsString());
+            throw new RuntimeException(e.getResponseBodyAsString(), e);
         } catch (Exception e) {
-            throw new RuntimeException("Error procesando respuesta IA: " + e.getMessage(), e);
+            log.error("❌ Error interno IA: {}", e.getMessage());
+            throw new RuntimeException(e.getMessage(), e);
         }
     }
-}
 
-    // ─────────────────────────────────────────────────────────────
-    // Prompts
-    // ─────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────
+    // 🧠 MÉTODOS PRINCIPALES
+    // ─────────────────────────────────────────────
 
-        private static final String GOJS_PROMPT_INSTRUCTION_GENERAR = """
+    public JsonNode generarDiagrama(String prompt) {
+        if (prompt == null || prompt.isEmpty()) {
+            throw new IllegalArgumentException("Prompt obligatorio");
+        }
+        return llamarOpenAI(GOJS_PROMPT_INSTRUCTION_GENERAR + "\n" + prompt);
+    }
+
+    public JsonNode modificarDiagrama(String prompt, Object jsonActual) {
+        try {
+            String combinado = "Prompt: " + prompt + "\nJSON:\n" +
+                    objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(jsonActual);
+
+            return llamarOpenAI(GOJS_PROMPT_INSTRUCTION_MODIFICAR + "\n" + combinado);
+
+        } catch (Exception e) {
+            throw new RuntimeException("Error modificando diagrama", e);
+        }
+    }
+
+    public JsonNode analizarCuellosDesdeImagen(String base64Image) {
+        try {
+            String limpio = base64Image.contains(",")
+                    ? base64Image.split(",")[1]
+                    : base64Image;
+
+            String prompt = GOJS_PROMPT_INSTRUCTION_ANALISIS_CUELLOS +
+                    "\nAnaliza esta imagen en base64:\n" + limpio;
+
+            return llamarOpenAI(prompt);
+
+        } catch (Exception e) {
+            throw new RuntimeException("Error analizando imagen", e);
+        }
+    }
+
+    // ─────────────────────────────────────────────
+    // 🧾 PROMPTS (ASEGÚRATE DE DEFINIRLOS)
+    // ─────────────────────────────────────────────
+
+ private static final String GOJS_PROMPT_INSTRUCTION_GENERAR = """
         Eres un experto en diagramas de actividades UML con GoJS.
         El usuario enviará un prompt en texto libre, y tu tarea es devolver
         ÚNICAMENTE un JSON válido que represente un diagrama de actividades en formato GoJS.
@@ -586,137 +603,4 @@ public class IAService {
         - Detecta mínimo 2 y máximo 5 recomendaciones generales
         - El JSON debe ser parseable directamente sin ningún ajuste
         """;
-
-    // ─────────────────────────────────────────────────────────────
-    // Helpers de payload
-    // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Construye el payload para llamadas de solo texto (generar / modificar).
-     */
-    private Map<String, Object> buildPayloadTexto(String systemPrompt, String userContent) {
-        List<Map<String, Object>> messages = new ArrayList<>();
-
-        messages.add(Map.of(
-                "role", "system",
-                "content", systemPrompt
-        ));
-        messages.add(Map.of(
-                "role", "user",
-                "content", userContent
-        ));
-
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("model", OPENAI_MODEL);
-        payload.put("messages", messages);
-        payload.put("temperature", 0.2);
-        return payload;
-    }
-
-    /**
-     * Construye el payload para análisis de imagen (vision).
-     * Usa el formato de content multipart de OpenAI.
-     */
-    private Map<String, Object> buildPayloadAnalisisCuellos(String base64Image, String mimeType) {
-        List<Map<String, Object>> messages = new ArrayList<>();
-
-        // System message con las instrucciones
-        messages.add(Map.of(
-                "role", "system",
-                "content", GOJS_PROMPT_INSTRUCTION_ANALISIS_CUELLOS
-        ));
-
-        // User message con texto + imagen inline (vision)
-        List<Map<String, Object>> userContent = new ArrayList<>();
-
-        userContent.add(Map.of(
-                "type", "text",
-                "text", "Analiza este diagrama de actividades UML, "
-                        + "detecta todos los cuellos de botella y "
-                        + "sugiere políticas de negocio concretas para optimizar el proceso."
-        ));
-
-        userContent.add(Map.of(
-                "type", "image_url",
-                "image_url", Map.of(
-                        "url", "data:" + mimeType + ";base64," + base64Image,
-                        "detail", "high"
-                )
-        ));
-
-        messages.add(Map.of(
-                "role", "user",
-                "content", userContent
-        ));
-
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("model", OPENAI_MODEL);
-        payload.put("messages", messages);
-        payload.put("temperature", 0.2);
-        return payload;
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // Métodos públicos
-    // ─────────────────────────────────────────────────────────────
-
-    public JsonNode generarDiagrama(String prompt) {
-        if (prompt == null || prompt.isEmpty()) {
-            throw new IllegalArgumentException("El campo 'prompt' es obligatorio.");
-        }
-        return llamarOpenAI(
-                buildPayloadTexto(GOJS_PROMPT_INSTRUCTION_GENERAR, prompt)
-        );
-    }
-
-    public JsonNode modificarDiagrama(String prompt, Object jsonActual) {
-        if (prompt == null || prompt.isEmpty()) {
-            throw new IllegalArgumentException("El campo 'prompt' es obligatorio.");
-        }
-        if (jsonActual == null) {
-            throw new IllegalArgumentException("El campo 'jsonActual' es obligatorio.");
-        }
-        try {
-            String combinedContent = "Prompt del usuario: " + prompt + "\nJSON actual: " +
-                    objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(jsonActual);
-            return llamarOpenAI(
-                    buildPayloadTexto(GOJS_PROMPT_INSTRUCTION_MODIFICAR, combinedContent)
-            );
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            log.error("Error interno al modificar diagrama", e);
-            throw new RuntimeException("Error interno al modificar diagrama", e);
-        }
-    }
-
-    public JsonNode analizarCuellosDesdeImagen(String base64Image) {
-        if (base64Image == null || base64Image.isBlank()) {
-            throw new IllegalArgumentException("La imagen en base64 es obligatoria.");
-        }
-        try {
-            // Elimina el prefijo data:image/png;base64, si viene del frontend
-            String imagenLimpia = base64Image.contains(",")
-                    ? base64Image.split(",")[1]
-                    : base64Image;
-
-            // Detecta el mimeType desde el prefijo o usa png por defecto
-            String mimeType = base64Image.startsWith("data:")
-                    ? base64Image.split(";")[0].replace("data:", "")
-                    : "image/png";
-
-            // Re-encodea para garantizar base64 válido
-            byte[] imageBytes       = Base64.getDecoder().decode(imagenLimpia);
-            String base64Reencoded  = Base64.getEncoder().encodeToString(imageBytes);
-
-            return llamarOpenAI(
-                    buildPayloadAnalisisCuellos(base64Reencoded, mimeType)
-            );
-        } catch (IllegalArgumentException e) {
-            throw e;
-        } catch (Exception e) {
-            log.error("Error interno al analizar cuellos de botella desde base64", e);
-            throw new RuntimeException("Error interno al analizar cuellos de botella desde base64", e);
-        }
-    }
 }
