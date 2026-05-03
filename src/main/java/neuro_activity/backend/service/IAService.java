@@ -2,16 +2,14 @@ package neuro_activity.backend.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.ArrayList;
-import java.util.Base64;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 @Service
@@ -21,10 +19,13 @@ public class IAService {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final RestTemplate restTemplate;
 
-    @Value("${openai.api.key}")
+    @Value("${openai.api.key:}")
     private String openaiApiKey;
 
-    private static final String OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+    // ✅ ENDPOINT NUEVO
+    private static final String OPENAI_URL = "https://api.openai.com/v1/responses";
+
+    // ✅ MODELO ACTUAL
     private static final String OPENAI_MODEL = "gpt-4.1-mini";
 
     public IAService() {
@@ -35,44 +36,76 @@ public class IAService {
         this.restTemplate = new RestTemplate(factory);
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // Llamada central a la API de OpenAI
-    // ─────────────────────────────────────────────────────────────
+    // 🔍 DEBUG + VALIDACIÓN
+    @PostConstruct
+    public void init() {
+        if (openaiApiKey == null || openaiApiKey.isEmpty()) {
+            throw new RuntimeException("❌ OPENAI_API_KEY no está configurada");
+        }
 
-    private JsonNode llamarOpenAI(Map<String, Object> payload) {
+        // eliminar comillas si Railway las mete
+        openaiApiKey = openaiApiKey.replace("\"", "");
+
+        log.info("✅ OpenAI API Key cargada correctamente");
+    }
+
+    // ─────────────────────────────────────────────
+    // LLAMADA A OPENAI (NUEVA API)
+    // ─────────────────────────────────────────────
+    private String llamarOpenAI(String prompt) {
         try {
             org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
             headers.set("Authorization", "Bearer " + openaiApiKey);
             headers.set("Content-Type", "application/json");
 
+            Map<String, Object> body = new HashMap<>();
+            body.put("model", OPENAI_MODEL);
+            body.put("input", prompt);
+
             org.springframework.http.HttpEntity<Map<String, Object>> request =
-                    new org.springframework.http.HttpEntity<>(payload, headers);
+                    new org.springframework.http.HttpEntity<>(body, headers);
 
             JsonNode response = restTemplate.postForObject(OPENAI_URL, request, JsonNode.class);
 
-            String textoRespuesta = response
-                    .path("choices").get(0)
-                    .path("message")
+            // ✅ NUEVA FORMA DE LEER RESPUESTA
+            return response
+                    .path("output")
+                    .get(0)
                     .path("content")
+                    .get(0)
+                    .path("text")
                     .asText()
                     .trim();
 
-            String cleanedText = textoRespuesta
+        } catch (HttpClientErrorException e) {
+            log.error("❌ Error HTTP OpenAI: {} - {}", e.getStatusCode(), e.getResponseBodyAsString());
+            throw new RuntimeException("Error OpenAI: " + e.getResponseBodyAsString(), e);
+        } catch (Exception e) {
+            log.error("❌ Error interno OpenAI: {}", e.getMessage());
+            throw new RuntimeException("Error interno OpenAI: " + e.getMessage(), e);
+        }
+    }
+
+    // ─────────────────────────────────────────────
+    // MÉTODO PÚBLICO DE EJEMPLO
+    // ─────────────────────────────────────────────
+    public JsonNode generarJsonDesdePrompt(String prompt) {
+        try {
+            String respuestaTexto = llamarOpenAI(prompt);
+
+            // limpiar markdown si viene con ```json
+            String cleaned = respuestaTexto
                     .replaceAll("(?s)^```json\\s*", "")
                     .replaceAll("(?s)```\\s*$", "")
                     .trim();
 
-            return objectMapper.readTree(cleanedText);
+            return objectMapper.readTree(cleaned);
 
-        } catch (HttpClientErrorException e) {
-            log.error("Error HTTP OpenAI: {} - {}", e.getStatusCode(), e.getResponseBodyAsString());
-            throw new RuntimeException("Error OpenAI: " + e.getStatusCode() +
-                    ". Detalle: " + e.getResponseBodyAsString(), e);
         } catch (Exception e) {
-            log.error("Error interno al llamar OpenAI: {}", e.getMessage());
-            throw new RuntimeException("Error interno al llamar OpenAI: " + e.getMessage(), e);
+            throw new RuntimeException("Error procesando respuesta IA: " + e.getMessage(), e);
         }
     }
+}
 
     // ─────────────────────────────────────────────────────────────
     // Prompts
